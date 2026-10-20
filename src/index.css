@@ -1,1 +1,74 @@
 @import "tailwindcss";
+
+/* Кастомные стили для приложения */
+
+/* Плавные переходы */
+* {
+  transition-property: background-color, border-color, color, fill, stroke, opacity, box-shadow, transform;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+/* Скроллбар */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Анимация появления модальных окон */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Применение анимаций */
+.fixed {
+  animation: fadeIn 0.2s ease-out;
+}
+
+main > div {
+  animation: slideUp 0.3s ease-out;
+}
+
+/* Адаптивные улучшения */
+@media (max-width: 640px) {
+  .text-2xl {
+    font-size: 1.25rem;
+  }
+}
+
+/* Печать */
+@media print {
+  header, nav, button {
+    display: none !important;
+  }
+}
