@@ -1,0 +1,14 @@
+{
+  "name": "carpool-auth",
+  "version": "1.0.0",
+  "description": "Сервис доменной авторизации для системы совместных поездок (LDAP/AD)",
+  "main": "auth-server.js",
+  "scripts": {
+    "start": "node auth-server.js"
+  },
+  "dependencies": {
+    "ldapjs": "^3.0.7",
+    "express": "^4.18.2",
+    "dotenv": "^16.3.1"
+  }
+}
