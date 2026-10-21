@@ -22,10 +22,10 @@ RUN addgroup -g 1001 -S nodejs && \
 
 USER carpool
 
-EXPOSE 3001
+EXPOSE 5123
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3001/api/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:5123/api/health || exit 1
 
 CMD ["node", "server.js"]

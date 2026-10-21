@@ -45,7 +45,7 @@ services:
       DB_USER: carpool_user
       DB_PASSWORD: ${DB_PASSWORD:-carpool_secure_password}
     ports:
-      - "127.0.0.1:3001:3001"  # Только localhost (Nginx проксирует)
+      - "127.0.0.1:5123:5123"  # Только localhost (Nginx проксирует)
     depends_on:
       postgres:
         condition: service_healthy
