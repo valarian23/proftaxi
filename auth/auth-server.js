@@ -25,6 +25,7 @@
 
 const express = require('express');
 const ldapjs = require('ldapjs');
+const ntlm = require('express-ntlm');
 require('dotenv').config();
 
 const app = express();
@@ -298,79 +299,215 @@ function extractNtlmUsername(buffer) {
 }
 
 // ============================================================
+// NTLM middleware для сквозной доменной авторизации (SSO)
+// ============================================================
+
+/**
+ * express-ntlm middleware.
+ * Автоматически обрабатывает NTLM-рукопожатие:
+ *   1. Клиент → NTLM Type 1 (Negotiate)
+ *   2. Сервер → NTLM Type 2 (Challenge)
+ *   3. Клиент → NTLM Type 3 (Authenticate)
+ * 
+ * После успешного рукопожатия в req.ntlm появляются данные пользователя:
+ *   req.ntlm.DomainName, req.ntlm.UserName, req.ntlm.Workstation
+ * 
+ * Настройки:
+ *   - domain: NetBIOS-имя домена (должно совпадать с AD)
+ *   - domaincontroller: адрес DC для валидации (опционально, для проверки пароля)
+ */
+const ntlmMiddleware = ntlm({
+  domain: LDAP_CONFIG.domain,
+  domaincontroller: null, // null = не проверять пароль через DC (доверяем NTLM-токену)
+});
+
+/**
+ * Получить информацию о пользователе из AD по имени (sAMAccountName)
+ * Используется после NTLM-аутентификации для получения displayName, email и т.д.
+ */
+async function getUserInfoFromAD(username) {
+  if (!LDAP_CONFIG.bindDN || !LDAP_CONFIG.bindPassword) {
+    // Нет service account — возвращаем только username
+    return {
+      username: username.toLowerCase(),
+      displayName: username,
+      email: `${username}@${LDAP_CONFIG.domain.toLowerCase()}.local`,
+    };
+  }
+
+  return new Promise((resolve) => {
+    const client = createLdapClient();
+    
+    client.bind(LDAP_CONFIG.bindDN, LDAP_CONFIG.bindPassword, (err) => {
+      if (err) {
+        console.error('[AD] Service bind failed:', err.message);
+        client.unbind();
+        return resolve({
+          username: username.toLowerCase(),
+          displayName: username,
+          email: `${username}@${LDAP_CONFIG.domain.toLowerCase()}.local`,
+        });
+      }
+
+      const searchFilter = LDAP_CONFIG.userSearchFilter.replace('{{username}}', username);
+      const opts = {
+        filter: searchFilter,
+        scope: 'sub',
+        attributes: [...LDAP_CONFIG.userAttributes, 'mail', 'userPrincipalName'],
+      };
+
+      client.search(LDAP_CONFIG.baseDN, opts, (err, res) => {
+        if (err) {
+          console.error('[AD] Search failed:', err.message);
+          client.unbind();
+          return resolve({
+            username: username.toLowerCase(),
+            displayName: username,
+            email: `${username}@${LDAP_CONFIG.domain.toLowerCase()}.local`,
+          });
+        }
+
+        let userEntry = null;
+        res.on('searchEntry', (entry) => {
+          userEntry = entry;
+        });
+
+        res.on('error', () => {
+          client.unbind();
+        });
+
+        res.on('end', () => {
+          client.unbind();
+          
+          if (!userEntry) {
+            return resolve({
+              username: username.toLowerCase(),
+              displayName: username,
+              email: `${username}@${LDAP_CONFIG.domain.toLowerCase()}.local`,
+            });
+          }
+
+          const attrs = userEntry.attributes || {};
+          const getVal = (name) => {
+            const attr = attrs[name];
+            if (!attr) return '';
+            const vals = attr.values || attr.vals || [];
+            return Array.isArray(vals) ? vals[0] || '' : String(vals);
+          };
+
+          resolve({
+            username: username.toLowerCase(),
+            displayName: getVal('displayName') || getVal('cn') || username,
+            email: getVal('mail') || getVal('userPrincipalName') || `${username}@${LDAP_CONFIG.domain.toLowerCase()}.local`,
+            dn: userEntry.objectName?.toString() || '',
+          });
+        });
+      });
+    });
+  });
+}
+
+// ============================================================
 // Маршруты
 // ============================================================
 
 /**
  * GET /auth — проверка авторизации (для Nginx auth_request)
  * 
+ * Поддерживает два метода:
+ *   1. NTLM — сквозная доменная авторизация (SSO)
+ *      Браузер автоматически отправляет NTLM-токен, если компьютер в домене
+ *   2. Basic Auth — fallback для не-доменных клиентов
+ * 
  * Nginx делает подзапрос сюда. Если пользователь авторизован — 200.
  * Если нет — 401 с WWW-Authenticate для запроса учётных данных.
  */
-app.get('/auth', (req, res) => {
+app.get('/auth', ntlmMiddleware, async (req, res) => {
+  // === Проверяем NTLM ===
+  if (req.ntlm && req.ntlm.UserName) {
+    const username = req.ntlm.UserName.toLowerCase();
+    console.log(`[AUTH] NTLM authenticated: ${req.ntlm.DomainName}\\${req.ntlm.UserName}`);
+    
+    try {
+      // Получаем полную информацию о пользователе из AD
+      const userInfo = await getUserInfoFromAD(username);
+      
+      res.set('X-Remote-User', userInfo.username);
+      res.set('X-Remote-Display-Name', userInfo.displayName);
+      res.set('X-Remote-Email', userInfo.email);
+      res.set('X-Auth-Method', 'ntlm');
+      return res.status(200).send('OK');
+    } catch (err) {
+      console.error('[AUTH] Error getting user info:', err.message);
+      // Даже если не получили информацию из AD — NTLM-аутентификация прошла
+      res.set('X-Remote-User', username);
+      res.set('X-Remote-Display-Name', username);
+      res.set('X-Auth-Method', 'ntlm');
+      return res.status(200).send('OK');
+    }
+  }
+
+  // === Проверяем Negotiate (Kerberos/SPNEGO) ===
+  const authHeader = req.headers['authorization'];
+  
+  if (authHeader && authHeader.startsWith('Negotiate ')) {
+    // Kerberos/SPNEGO — для полноценной реализации нужен пакет 'kerberos'
+    // Пока возвращаем 401, чтобы браузер переключился на NTLM или Basic
+    console.log('[AUTH] Negotiate header received, but Kerberos not configured');
+  }
+
+  // === Проверяем Basic Auth ===
   const auth = parseAuthorization(req);
   
-  if (!auth.method) {
-    // Нет заголовка Authorization — запрашиваем учётные данные
-    res.set('WWW-Authenticate', 'Basic realm="Корпоративные поездки"');
-    return res.status(401).send('Authentication required');
-  }
-
   if (auth.method === 'basic') {
-    // Basic Auth — проверяем через LDAP
-    ldapAuthenticate(auth.username, auth.password)
-      .then(user => {
-        if (user) {
-          // Успешная авторизация
-          res.set('X-Remote-User', user.username);
-          res.set('X-Remote-Display-Name', user.displayName);
-          res.set('X-Auth-Method', 'basic');
-          res.status(200).send('OK');
-        } else {
-          // Неверные учётные данные
-          res.set('WWW-Authenticate', 'Basic realm="Корпоративные поездки", error="Invalid credentials"');
-          res.status(401).send('Invalid credentials');
-        }
-      })
-      .catch(err => {
-        console.error('LDAP error:', err.message);
-        res.status(500).send('Authentication service error');
-      });
-    return;
-  }
-
-  if (auth.method === 'ntlm') {
-    if (auth.type === 1) {
-      // NTLM Type 1 — отправляем challenge (Type 2)
-      // Для полноценной NTLM нужен winbind или samba
-      // Здесь — заглушка, запрашиваем Basic Auth
-      res.set('WWW-Authenticate', 'NTLM');
-      res.set('WWW-Authenticate', 'Basic realm="Корпоративные поездки"');
-      return res.status(401).send('NTLM challenge');
-    }
-    
-    if (auth.type === 3 && auth.username) {
-      // NTLM Type 3 — пользователь уже аутентифицирован DC
-      // Доверяем NTLM-токену (если настроен winbind)
-      // Или запрашиваем Basic Auth для проверки пароля
-      res.set('X-Remote-User', auth.username);
-      res.set('X-Remote-Display-Name', auth.username);
-      res.set('X-Auth-Method', 'ntlm');
-      res.status(200).send('OK');
-      return;
+    try {
+      const user = await ldapAuthenticate(auth.username, auth.password);
+      if (user) {
+        res.set('X-Remote-User', user.username);
+        res.set('X-Remote-Display-Name', user.displayName);
+        res.set('X-Auth-Method', 'basic');
+        return res.status(200).send('OK');
+      }
+    } catch (err) {
+      console.error('[AUTH] LDAP error:', err.message);
+      return res.status(500).send('Authentication service error');
     }
   }
 
-  // Неизвестный метод — запрашиваем Basic Auth
-  res.set('WWW-Authenticate', 'Basic realm="Корпоративные поездки"');
-  res.status(401).send('Unsupported auth method');
+  // === Нет авторизации — запрашиваем NTLM + Basic ===
+  // Важно: только ASCII-символы в заголовках!
+  // NTLM должен идти первым — браузер в домене Windows автоматически ответит NTLM-токеном
+  res.setHeader('WWW-Authenticate', 'NTLM');
+  res.status(401).send('Authentication required');
 });
 
 /**
  * POST /auth — альтернативный эндпоинт для проверки (если нужно)
  */
-app.post('/auth', (req, res) => {
-  // Аналогично GET /auth
+app.post('/auth', ntlmMiddleware, async (req, res) => {
+  // Аналогично GET /auth — поддерживаем NTLM
+  if (req.ntlm && req.ntlm.UserName) {
+    const username = req.ntlm.UserName.toLowerCase();
+    try {
+      const userInfo = await getUserInfoFromAD(username);
+      return res.json({
+        id: userInfo.username,
+        username: userInfo.username,
+        displayName: userInfo.displayName,
+        email: userInfo.email,
+        authMethod: 'ntlm',
+      });
+    } catch (err) {
+      return res.json({
+        id: username,
+        username: username,
+        displayName: username,
+        authMethod: 'ntlm',
+      });
+    }
+  }
+  
+  // Fallback — redirect на GET
   res.redirect(307, '/auth');
 });
 
@@ -378,31 +515,55 @@ app.post('/auth', (req, res) => {
  * GET /auth/me — информация о текущем пользователе
  * Используется фронтендом для получения данных пользователя
  */
-app.get('/auth/me', (req, res) => {
-  const auth = parseAuthorization(req);
-  
-  if (!auth.method || auth.method !== 'basic') {
-    res.set('WWW-Authenticate', 'Basic realm="Корпоративные поездки"');
-    return res.status(401).json({ error: 'Authentication required' });
+app.get('/auth/me', ntlmMiddleware, async (req, res) => {
+  // === NTLM-пользователь ===
+  if (req.ntlm && req.ntlm.UserName) {
+    const username = req.ntlm.UserName.toLowerCase();
+    try {
+      const userInfo = await getUserInfoFromAD(username);
+      return res.json({
+        id: userInfo.username,
+        username: userInfo.username,
+        displayName: userInfo.displayName,
+        email: userInfo.email,
+        role: 'both',
+        authMethod: 'ntlm',
+      });
+    } catch (err) {
+      return res.json({
+        id: username,
+        username: username,
+        displayName: username,
+        role: 'both',
+        authMethod: 'ntlm',
+      });
+    }
   }
 
-  ldapAuthenticate(auth.username, auth.password)
-    .then(user => {
+  // === Basic Auth ===
+  const auth = parseAuthorization(req);
+  
+  if (auth.method === 'basic') {
+    try {
+      const user = await ldapAuthenticate(auth.username, auth.password);
       if (user) {
-        res.json({
+        return res.json({
           id: user.username,
           username: user.username,
           displayName: user.displayName,
-          role: 'both', // По умолчанию — и водитель, и пассажир
+          role: 'both',
+          authMethod: 'basic',
         });
-      } else {
-        res.status(401).json({ error: 'Invalid credentials' });
       }
-    })
-    .catch(err => {
-      console.error('LDAP error:', err.message);
-      res.status(500).json({ error: 'Authentication service error' });
-    });
+    } catch (err) {
+      console.error('[AUTH] LDAP error:', err.message);
+      return res.status(500).json({ error: 'Authentication service error' });
+    }
+  }
+
+  // Нет авторизации — запрашиваем NTLM (браузер в домене ответит автоматически)
+  res.setHeader('WWW-Authenticate', 'NTLM');
+  return res.status(401).json({ error: 'Authentication required' });
 });
 
 /**
