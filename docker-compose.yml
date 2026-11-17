@@ -1,0 +1,69 @@
+# ============================================================
+# Docker Compose для системы совместных поездок
+# 
+# Использование:
+#   docker compose up -d
+#
+# Перед запуском создайте файл .env с переменными окружения
+# ============================================================
+
+version: '3.8'
+
+services:
+  # PostgreSQL база данных
+  postgres:
+    image: postgres:15-alpine
+    container_name: carpool-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: carpool
+      POSTGRES_USER: carpool_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-carpool_secure_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"  # Только localhost
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U carpool_user -d carpool"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Node.js бэкенд
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: carpool-backend
+    restart: unless-stopped
+    environment:
+      PORT: 3001
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: carpool
+      DB_USER: carpool_user
+      DB_PASSWORD: ${DB_PASSWORD:-carpool_secure_password}
+    ports:
+      - "127.0.0.1:5123:5123"  # Только localhost (Nginx проксирует)
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Nginx (раздача статики + проксирование API)
+  nginx:
+    image: nginx:alpine
+    container_name: carpool-nginx
+    restart: unless-stopped
+    volumes:
+      - ./dist:/usr/share/nginx/html:ro
+      - ./deploy/nginx-docker.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+    driver: local

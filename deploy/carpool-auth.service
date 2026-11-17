@@ -1,0 +1,15 @@
+[Unit]
+Description=Carpool Auth Service (LDAP/AD)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/carpool/auth
+ExecStart=/usr/local/bin/node auth-server.js
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
