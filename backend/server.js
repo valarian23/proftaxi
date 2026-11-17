@@ -44,12 +44,23 @@ const pool = new Pool({
 // ==================== Middleware: Авторизация ====================
 
 /**
- * Извлекает пользователя из заголовка X-Remote-User (устанавливается Nginx при NTLM-авторизации).
+ * Извлекает пользователя из заголовков, установленных Nginx после auth_request.
+ * 
+ * Заголовки от auth-сервера (через Nginx):
+ *   - X-Remote-User: sAMAccountName (логин)
+ *   - X-Remote-Display-Name: displayName (ФИО из AD)
+ *   - X-Remote-Email: email из AD
+ *   - X-Auth-Method: ntlm | basic
+ * 
  * В демо-режиме (без Nginx) можно передавать X-Demo-User.
  */
 function authMiddleware(req, res, next) {
-  // Заголовок от Nginx (после NTLM-авторизации)
+  // Заголовки от Nginx (после NTLM/Basic авторизации через auth-сервер)
   const remoteUser = req.headers['x-remote-user'];
+  const remoteDisplayName = req.headers['x-remote-display-name'];
+  const remoteEmail = req.headers['x-remote-email'];
+  const authMethod = req.headers['x-auth-method'];
+  
   // Демо-заголовок для тестирования
   const demoUser = req.headers['x-demo-user'];
   
@@ -61,12 +72,16 @@ function authMiddleware(req, res, next) {
       id: 'demo_user',
       username: 'demo_user',
       displayName: 'Демо Пользователь',
+      email: '',
+      authMethod: 'demo',
     };
   } else {
     req.user = {
       id: username.toLowerCase(),
       username: username.toLowerCase(),
-      displayName: username, // В продакшене Nginx может передавать и DisplayName
+      displayName: remoteDisplayName || username,
+      email: remoteEmail || `${username.toLowerCase()}@company.local`,
+      authMethod: authMethod || 'unknown',
     };
   }
   
@@ -90,7 +105,20 @@ app.get('/api/health', async (req, res) => {
 
 // Текущий пользователь
 app.get('/api/auth/me', (req, res) => {
-  res.json(req.user);
+  // Если нет реального пользователя (демо-режим) — возвращаем 401
+  // чтобы фронтенд показал экран входа
+  if (req.user.authMethod === 'demo') {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  
+  res.json({
+    id: req.user.id,
+    username: req.user.username,
+    displayName: req.user.displayName,
+    email: req.user.email,
+    role: 'both', // По умолчанию — и водитель, и пассажир
+    authMethod: req.user.authMethod,
+  });
 });
 
 // ==================== Trips ====================

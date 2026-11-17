@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
-import { User } from './types';
-import { getCurrentUser, setCurrentUser, checkAuth } from './api';
+import { useState, useEffect, useCallback } from 'react';
+import { User, Trip } from './types';
+import { getCurrentUser, setCurrentUser, checkAuth, getTrips } from './api';
 import { Header } from './components/Header';
 import { TripList } from './components/TripList';
 import { CreateTripForm } from './components/CreateTripForm';
 import { MyTrips } from './components/MyTrips';
 import { MyBookings } from './components/MyBookings';
+import { BookingForm } from './components/BookingForm';
 import { LoginScreen } from './components/LoginScreen';
 
 type Page = 'trips' | 'create' | 'my-trips' | 'my-bookings';
@@ -14,44 +15,61 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const [currentPage, setCurrentPage] = useState<Page>('trips');
   const [loading, setLoading] = useState(true);
-  const [authError, setAuthError] = useState<string | null>(null);
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [selectedTrip, setSelectedTrip] = useState<Trip | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // Загрузка данных
+  const refreshData = useCallback(async () => {
+    try {
+      const tripsData = await getTrips();
+      setTrips(tripsData);
+    } catch (err) {
+      console.error('Failed to load trips:', err);
+    }
+  }, []);
 
   useEffect(() => {
-    // Проверяем авторизацию при загрузке
     checkAuthentication();
   }, []);
+
+  useEffect(() => {
+    if (user) {
+      refreshData();
+    }
+  }, [user, refreshKey, refreshData]);
 
   async function checkAuthentication() {
     try {
       setLoading(true);
-      setAuthError(null);
-      
-      // Пытаемся получить текущего пользователя через API
-      // В продакшене Nginx выполнит NTLM-авторизацию автоматически
+
+      // Пытаемся получить текущего пользователя через NTLM/SSO
       const authResult = await checkAuth();
-      
+
       if (authResult.success && authResult.user) {
-        // Авторизация успешна (NTLM/Kerberos или Basic Auth)
-        setUser(authResult.user);
-        setCurrentUser(authResult.user);
+        // Авторизация успешна (NTLM/Kerberos через Nginx)
+        const loggedInUser: User = {
+          id: authResult.user.id || authResult.user.username,
+          username: authResult.user.username,
+          displayName: authResult.user.displayName || authResult.user.username,
+          role: (authResult.user.role as User['role']) || 'both',
+        };
+        setUser(loggedInUser);
+        setCurrentUser(loggedInUser);
       } else {
-        // Проверим, есть ли сохранённый пользователь (демо-режим)
-        const storedUser = getCurrentUser();
-        if (storedUser) {
+        // NTLM не сработал — проверяем localStorage (демо-режим)
+        const storedUser = await getCurrentUser();
+        if (storedUser && storedUser.id !== 'demo_user') {
           setUser(storedUser);
-        } else {
-          // Нет авторизации — покажем экран входа
-          setAuthError(authResult.error || 'Требуется авторизация');
         }
+        // Если нет пользователя — покажем LoginScreen
       }
     } catch (err) {
-      // Бэкенд недоступен — работаем в демо-режиме
-      console.log('Backend unavailable, using demo mode');
-      const storedUser = getCurrentUser();
-      if (storedUser) {
+      console.log('Auth check failed, using demo mode:', err);
+      const storedUser = await getCurrentUser();
+      if (storedUser && storedUser.id !== 'demo_user') {
         setUser(storedUser);
       }
-      // Если нет сохранённого пользователя — покажем LoginScreen
     } finally {
       setLoading(false);
     }
@@ -59,7 +77,31 @@ function App() {
 
   function handleLogin(loggedInUser: User) {
     setUser(loggedInUser);
-    setAuthError(null);
+    setCurrentUser(loggedInUser);
+  }
+
+  function handleSelectTrip(trip: Trip) {
+    setSelectedTrip(trip);
+  }
+
+  function handleCloseBooking() {
+    setSelectedTrip(null);
+  }
+
+  function handleBookingSuccess() {
+    setSelectedTrip(null);
+    setRefreshKey((k) => k + 1);
+  }
+
+  function handleTripCreated() {
+    setCurrentPage('trips');
+    setRefreshKey((k) => k + 1);
+  }
+
+  function handleNavigate(page: Page) {
+    setCurrentPage(page);
+    setSelectedTrip(null);
+    setRefreshKey((k) => k + 1);
   }
 
   // Экран загрузки
@@ -82,20 +124,43 @@ function App() {
     return <LoginScreen onLogin={handleLogin} />;
   }
 
+  // Показываем форму бронирования, если выбрана поездка
+  if (selectedTrip) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <Header user={user} currentPage={currentPage} onNavigate={handleNavigate} />
+        <main className="max-w-6xl mx-auto px-4 py-6">
+          <BookingForm
+            trip={selectedTrip}
+            user={user}
+            onSuccess={handleBookingSuccess}
+            onCancel={handleCloseBooking}
+          />
+        </main>
+      </div>
+    );
+  }
+
   // Основное приложение
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header 
-        user={user} 
-        currentPage={currentPage} 
-        onNavigate={setCurrentPage} 
-      />
-      
+      <Header user={user} currentPage={currentPage} onNavigate={handleNavigate} />
+
       <main className="max-w-6xl mx-auto px-4 py-6">
-        {currentPage === 'trips' && <TripList user={user} />}
-        {currentPage === 'create' && <CreateTripForm user={user} />}
-        {currentPage === 'my-trips' && <MyTrips user={user} />}
-        {currentPage === 'my-bookings' && <MyBookings user={user} />}
+        {currentPage === 'trips' && (
+          <TripList trips={trips} onSelectTrip={handleSelectTrip} user={user} />
+        )}
+        {currentPage === 'create' && (
+          <CreateTripForm
+            user={user}
+            onSuccess={handleTripCreated}
+            onCancel={() => handleNavigate('trips')}
+          />
+        )}
+        {currentPage === 'my-trips' && (
+          <MyTrips userId={user.id} onRefresh={() => setRefreshKey((k) => k + 1)} />
+        )}
+        {currentPage === 'my-bookings' && <MyBookings userId={user.id} />}
       </main>
     </div>
   );

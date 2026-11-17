@@ -6,7 +6,7 @@
 
 import { useState } from 'react';
 import { User } from '../types';
-import { setCurrentUser } from '../api';
+import { setCurrentUser, getCurrentUser } from '../api';
 
 interface LoginScreenProps {
   onLogin: (user: User) => void;

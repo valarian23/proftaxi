@@ -146,6 +146,29 @@ function getTomorrowDate(): string {
 
 // ==================== API METHODS ====================
 
+/** Проверка авторизации (для NTLM/SSO) */
+export async function checkAuth(): Promise<{ success: boolean; user?: User; error?: string }> {
+  if (await checkBackend()) {
+    try {
+      const res = await fetch(`${API_BASE}/auth/me`, { 
+        credentials: 'include',
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      if (res.ok) {
+        const userData = await res.json();
+        return { success: true, user: userData };
+      } else if (res.status === 401) {
+        return { success: false, error: 'Требуется авторизация' };
+      }
+    } catch (err) {
+      return { success: false, error: 'Сервер недоступен' };
+    }
+  }
+  
+  return { success: false, error: 'Бэкенд недоступен' };
+}
+
 /** Получить текущего пользователя */
 export async function getCurrentUser(): Promise<User | null> {
   if (await checkBackend()) {
